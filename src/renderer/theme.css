@@ -1,0 +1,58 @@
+/* Messenger surfaces measured against the reference; Fenn Code is unaffected. */
+:root {
+  --bg: #fcfcfb;
+  --bg-sidebar: #f6f6f4;
+  --bg-elevated: #fff;
+  --bg-floating: #fff;
+  --bg-hover: #ededed;
+  --bg-active: #e7e7e7;
+  --bg-input: #fff;
+  --bg-panel: #f9f9f7;
+  --bg-code: #f6f6f4;
+  --text: #202020;
+  --text-2: #555;
+  --text-3: #737373;
+  --text-4: #a8a8a8;
+  --border: #ececec;
+  --border-strong: #dedede;
+  --accent: #242424;
+  --accent-text: #242424;
+  --accent-soft: #e9e9e9;
+  --focus-ring: #818181;
+  --input-focus: #c9c9c9;
+  --bubble-bot: #f0f0f0;
+  --bubble-user: #222;
+  --bubble-user-fg: #fff;
+  --bot-face: #142b44;
+  --bot-eye: #fff;
+  --bot-cheek: #43617d;
+  --radius-bot-composer: 24px;
+}
+:root[data-theme="dark"] {
+  --bg: #181818;
+  --bg-sidebar: #202020;
+  --bg-elevated: #2c2c2a;
+  --bg-floating: #2c2c2a;
+  --bg-hover: #333;
+  --bg-active: #363636;
+  --bg-input: #292929;
+  --bg-panel: #202020;
+  --bg-code: #222;
+  --text: #eee;
+  --text-2: #c0c0c0;
+  --text-3: #a1a1a1;
+  --text-4: #777;
+  --border: #333;
+  --border-strong: #424242;
+  --accent: #ededed;
+  --accent-text: #ededed;
+  --accent-soft: #393939;
+  --focus-ring: #ababab;
+  --input-focus: #565656;
+  --bubble-bot: #292929;
+  --bubble-user: #e6e6e6;
+  --bubble-user-fg: #151515;
+  --bot-face: #b9cde1;
+  --bot-eye: #202020;
+  --bot-cheek: #91acc7;
+}

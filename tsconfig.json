@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "types": ["node", "vite/client"],
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "paths": {
+      "@fenn-main/*": ["./vendor/fenn/src/main/*"],
+      "@fenn-shared/*": ["./vendor/fenn/src/shared/*"],
+      "@fenn-ui/*": ["./vendor/fenn/src/renderer/src/*"],
+      "@shared/*": ["./vendor/fenn/src/shared/*"]
+    }
+  },
+  "include": ["src", "test", "*.config.ts"]
+}

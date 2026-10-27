@@ -1,0 +1,888 @@
+/**
+ * App domain model: projects, conversations, messages, routines.
+ * Shared by main (source of truth) and renderer (view). Backend-agnostic.
+ */
+import type { GenerationTiming, MessageUsage, UsageTotals } from './usage'
+import type { BrowserInfo, BrowserFrame } from './browser'
+import type { AccountStatus, BackendSummary, CreditQuota, ModelInfo, PermissionDecision, PermissionRequest, SessionOption, ToolStatus } from './contract'
+
+export interface Attachment {
+  name: string
+  mimeType: string
+  size: number
+  kind: 'image' | 'file'
+  /** base64, for images */
+  data?: string
+  /** contents, for text files */
+  text?: string
+  path?: string
+}
+
+export type Block =
+  | { type: 'text'; text: string }
+  | { type: 'attachment'; attachment: Attachment }
+  /** startedAt/ms: when thinking began and how long it took, for 「思考了 4 秒」. */
+  | { type: 'thought'; text: string; startedAt?: number; ms?: number }
+  | { type: 'tool'; toolId: string; title: string; toolKind?: string; status: ToolStatus; input?: string; output?: string; paths?: string[] }
+  | { type: 'plan'; entries: { content: string; status: 'pending' | 'in_progress' | 'completed' }[] }
+  | { type: 'notice'; level: 'info' | 'warning' | 'error'; text: string; key?: string }
+  /** The chat was given this folder because the agent made files (「已放在 …」). */
+  | { type: 'placed'; path: string }
+  /** In a project chat: the card of a thread started from this message. */
+  | { type: 'thread-card'; threadId: string }
+  /**
+   * In a project chat, shown to the user only (never to an agent): a thread needs their decision,
+   * or the user sent a message straight to a thread with @.
+   */
+  | { type: 'thread-event'; threadId: string; kind: 'decision' | 'forwarded'; text: string; /** For a decision: matches the thread's needsUser.at while it is still open. */ at?: number }
+  /** A message between two threads of a project (see PeerMessage): sent from here, or delivered here. */
+  | { type: 'peer-message'; peerId: string; direction: 'out' | 'in' }
+  /** A result the agent handed over: a file on this computer or a link. Shown as a card under the reply. */
+  | { type: 'output'; kind: 'file' | 'link'; title: string; path?: string; url?: string; size?: number }
+  /** An interactive HTML result. Legacy blocks open in the side pane. */
+  | { type: 'artifact'; artifactId: string; title: string; version: number; display?: 'inline' | 'panel' }
+  /** A question for the user with a few options, one recommended; `chosen` once answered. */
+  | {
+      type: 'decision'
+      question: string
+      context?: string
+      options: { label: string; consequence: string }[]
+      recommended: number
+      chosen?: number
+    }
+
+export type MessageRole = 'user' | 'assistant' | 'system'
+
+/** A contextual reference, never a routing instruction or an automatic wake-up. */
+export interface ConversationReference { id: string; title: string }
+
+/** How long the model picker waits for an agent that is still starting (Antigravity takes 15–25 s on Windows). */
+export const MODEL_PROBE_TIMEOUT_MS = 90_000
+
+/** Whether a search query is long enough to run (a single CJK character counts). */
+export const searchable = (q: string): boolean => {
+  const t = q.trim()
+  return t.length >= 2 || /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff]/.test(t)
+}
+
+/** One day's usage across every chat: new input plus output, as replies reported them. */
+export interface UsageDay {
+  /** Local date, YYYY-MM-DD. */
+  day: string
+  tokens: number
+  replies: number
+}
+
+/** One model's share of the usage across every chat. */
+export interface ModelUsage extends ReplyModel {
+  tokens: number
+  replies: number
+}
+
+export interface UsageSummary {
+  days: UsageDay[]
+  /** Most used first. */
+  models: ModelUsage[]
+}
+
+export interface Message {
+  id: string
+  conversationId: string
+  role: MessageRole
+  blocks: Block[]
+  references?: ConversationReference[]
+  createdAt: number
+  /** 'streaming' while the agent is still producing it. */
+  state?: 'streaming' | 'done' | 'error' | 'cancelled'
+  /** Cut off because the app quit mid-reply (not stopped by the user). */
+  interrupted?: boolean
+  /** Cut off because the user switched to this agent mid-reply (its name). */
+  switchedTo?: string
+  error?: string
+  reactions?: string[]
+  /** Hidden from the transcript (e.g. relayed notes delivered to an agent). */
+  hidden?: boolean
+  /**
+   * App bookkeeping with the agent (save-memory before a handoff, resume after
+   * a restart): never shown, and never replayed to a later session.
+   */
+  housekeeping?: boolean
+  /** Both sides of a turn the app ran for a button (压缩上下文): shown as one line, not as a chat. */
+  action?: 'compact'
+  /** In a project chat: the thread this message was passed on to. */
+  forwardedTo?: string
+  /**
+   * A user message that was edited or answered again: which version of that
+   * turn this is. Older versions (with what followed them) are kept aside and
+   * can be switched back to.
+   */
+  variant?: { group: string; index: number; count: number }
+  /** The agent corrected this reply in place later (see the correct_message tool). */
+  editedAt?: number
+  /** Replies: the tokens (and cost) the backend reported for this turn; absent when it reported none. */
+  usage?: MessageUsage
+  timing?: GenerationTiming
+  /** Replies: the agent and model that wrote it (for the home page's model ranking). */
+  model?: ReplyModel
+}
+
+export interface ReplyModel {
+  backendId: string
+  id?: string
+  name?: string
+}
+
+export type ConversationKind = 'chat' | 'project' | 'thread'
+export type WorkStatus = 'idle' | 'working' | 'waiting' | 'done' | 'error'
+
+/** A project worker owns this checkout; the project's folder stays on its integration branch. */
+export interface ThreadWorkspace {
+  root: string
+  path: string
+  branch: string
+  targetBranch: string
+  base: string
+}
+
+export interface DeliveryReview {
+  id: string
+  /** Findings are evidence for a decision, never an instruction to merge experiment code. */
+  kind?: 'change' | 'finding'
+  state: 'pending' | 'returned' | 'stale' | 'merging' | 'accepted'
+  summary: string
+  /** Worker reports, never presented as independently verified results. */
+  checks: string
+  unverified: string
+  submittedAt: number
+  head?: string
+  base?: string
+  assessment?: {
+    targetHead?: string
+    files: string[]
+    changes?: ReviewChangedFile[]
+    overlaps: { threadId: string; title: string; files: string[] }[]
+    blockers: string[]
+    diff: string
+  }
+  recommendation?: { verdict: 'ready' | 'changes_requested' | 'needs_discussion'; notes: string; summary?: string; integrationPlan?: string; targetHead?: string; at: number }
+  feedback?: string
+  continuation?: 'thread' | 'main'
+  /** A recorded human decision still needs to be consumed by the coordinator. */
+  decisionPending?: boolean
+  decidedAt?: number
+  mergeCommit?: string
+}
+
+export interface ReviewChangedFile {
+  path: string
+  status: 'added' | 'modified' | 'deleted'
+  added?: number
+  removed?: number
+}
+
+export interface ReviewFileContent {
+  path: string
+  before?: string
+  after?: string
+  patch: string
+  binary?: boolean
+  tooBig?: boolean
+}
+
+/** A message waiting behind the running reply. */
+export interface QueuedMessage {
+  id: string
+  text: string
+  attachments?: Attachment[]
+  references?: ConversationReference[]
+}
+
+export interface Conversation {
+  id: string
+  kind: ConversationKind
+  title: string
+  projectId?: string
+  /** For threads: the project-chat message the thread hangs under. */
+  anchorMessageId?: string
+  /** Created by this routine's run. */
+  routineId?: string
+  /** A sub-conversation: the chat whose agent started it. The two never talk afterwards. */
+  parentId?: string
+  /** What the parent's agent handed over when it started this sub-conversation. */
+  handoff?: { by: string; task: string; context?: string }
+  /** cwd is a folder the app made for this chat once it made files; listed with folderless chats. */
+  autoFolder?: boolean
+  backendId: string
+  /** A backend picked during a reply: it takes over when the next message goes out. */
+  nextBackendId?: string
+  modelId?: string
+  models?: ModelInfo[]
+  /** The session's other choices (mode, thinking level…), as the agent last reported them. */
+  sessionOptions?: SessionOption[]
+  /** What the user chose for those options in this conversation. */
+  optionValues?: Record<string, string>
+  cwd?: string
+  workspace?: ThreadWorkspace
+  taskKind?: 'change' | 'finding'
+  /** Code-changing threads prepare an isolated checkout before opening an agent session. */
+  isolateWorkspace?: boolean
+  review?: DeliveryReview
+  createdAt: number
+  updatedAt: number
+  status: WorkStatus
+  /** Task plan (✓ / ✱ / ○ lines): written by the agent (update_status or its own ACP plan), or by the app for threads. */
+  checklist?: string
+  /** Obstacles the agent reported, oldest first; the last one without resolvedAt is the current one. */
+  blockers?: Blocker[]
+  /** The title was made by the app or agent (not typed by the user), so it may be improved later. */
+  titleAuto?: boolean
+  /** The app already offered this finished thread for the project's progress board. */
+  progressSuggested?: boolean
+  /** The checklist was written by the app because the agent never called update_status. */
+  checklistAuto?: boolean
+  /** The agent's own command for compacting its context (e.g. compact), when it offers one. */
+  compactCommand?: string
+  /** The slash commands the agent offers now (without the slash), for the / menu. */
+  agentCommands?: { name: string; description?: string }[]
+  /** Commands the agent ran through the app, newest last (the last few kept), shown under 后台. */
+  background?: BackgroundCommand[]
+  /** Messages the user sent while a reply runs, waiting their turn (not kept across a restart). */
+  queued?: QueuedMessage[]
+  resolved?: boolean
+  pinned?: boolean
+  /** Messages the user has not seen yet. */
+  unread?: boolean
+  lastPreview?: string
+  /** Selected, traceable excerpts; generated in a disposable background session. */
+  contextDigest?: { fingerprint: string; notes: ContextNote[]; updatedAt: number }
+  /** The backend session this conversation last used, for resuming after a restart. */
+  sessionRef?: { backendId: string; sessionId: string }
+  /** The user's instructions (自定义指令 and the project's) as the agent last received them, to hand over a change once. */
+  instructionsSent?: string
+  /** Visible messages in the conversation. */
+  messageCount?: number
+  /** Tokens and cost the backend reported, added up over every turn (hidden ones included). */
+  usage?: UsageTotals
+  /** Latest visible reply, separate from cumulative usage. Old replies are not backfilled. */
+  timing?: GenerationTiming
+  /**
+   * Project conversations: a running summary of the facts said so far
+   * (people, preferences, decisions, open items), written by the backend
+   * before each handoff and merged with the previous one.
+   */
+  factsSummary?: string
+  /** The last message factsSummary covers. */
+  factsThrough?: string
+  /**
+   * The agent needs the user in person: a decision card, a permission prompt, or
+   * a thread that stopped stuck. Cleared once the user answers or writes. This,
+   * not text in the reply, decides which notifications a project's level lets through.
+   */
+  needsUser?: { kind: 'decision' | 'permission' | 'blocked'; text?: string; at: number }
+  /** Project chats: when the coordinator last saw the list of threads (see Orchestrator.threadIndex). */
+  threadsSeenAt?: number
+}
+
+export interface ContextNote {
+  id: string
+  kind: 'source' | 'output'
+  title: string
+  excerpt: string
+  messageId: string
+}
+
+export interface Project {
+  id: string
+  name: string
+  description?: string
+  /** Standing instructions every agent in the project receives. */
+  instructions?: string
+  cwd?: string
+  backendId: string
+  /** The project chat (coordinator conversation). */
+  conversationId: string
+  createdAt: number
+  updatedAt: number
+  pinned?: boolean
+  icon?: string
+  /** Put away: hidden from the sidebar and the main project list, kept intact. */
+  archived?: boolean
+  /** The project's progress board: milestones, each with optional tasks. */
+  progress?: ProgressItem[]
+  /** Which desktop notifications the project raises (default 'coordinator'). */
+  notify?: NotifyLevel
+  /** Results agents handed over in this project's conversations, newest last (the project's library). */
+  outputs?: ProjectOutput[]
+  /** Human decisions waiting for coordinator follow-through, independent of resubmissions. */
+  pendingReviewDecisions?: ReviewDecisionNotice[]
+}
+
+export interface ReviewDecisionNotice {
+  id: string
+  threadId: string
+  revision: string
+  title: string
+  decision: 'accepted' | 'returned' | 'discussion'
+  kind?: 'change' | 'finding'
+  feedback?: string
+  continuation?: 'thread' | 'main'
+  mergeCommit?: string
+  integrationPlan?: string
+  at: number
+}
+
+/** When a message one thread leaves for another is delivered. */
+export type PeerDelivery = 'now' | 'when_idle' | 'after_current_task'
+
+/** Something a thread hands over with a message: a result card, a project file, or a page. */
+export interface PeerOutput {
+  kind: 'file' | 'link' | 'page'
+  title: string
+  path?: string
+  url?: string
+  pageId?: string
+}
+
+/**
+ * A message one project thread (or the project chat) leaves for another thread,
+ * delivered when its condition is met. Kept across restarts.
+ */
+export interface PeerMessage {
+  id: string
+  projectId: string
+  fromId: string
+  toId: string
+  text: string
+  outputs?: PeerOutput[]
+  deliver: PeerDelivery
+  /** 1 for a message sent in a turn the user started; one more for each message-triggered turn. */
+  hop: number
+  /** Threads the chain has already passed through, oldest first (the sender included). */
+  chain: string[]
+  state: 'pending' | 'delivered' | 'cancelled' | 'failed'
+  /** Why it was not delivered. */
+  reason?: string
+  createdAt: number
+  deliveredAt?: number
+}
+
+/**
+ * A project's notifications, as in Claude: every new message (each thread's
+ * replies too); the project chat plus whatever needs the user (the default);
+ * only what needs the user; or nothing.
+ */
+export type NotifyLevel = 'all' | 'coordinator' | 'mentions' | 'none'
+
+export interface ProjectOutput {
+  id: string
+  kind: 'file' | 'link'
+  title: string
+  path?: string
+  url?: string
+  size?: number
+  conversationId: string
+  messageId: string
+  at: number
+}
+
+export type ProgressStatus = 'todo' | 'doing' | 'blocked' | 'done'
+
+/** A milestone (top level) or a task under one. */
+export interface ProgressItem {
+  id: string
+  title: string
+  status: ProgressStatus
+  /** YYYY-MM-DD */
+  due?: string
+  note?: string
+  /** Threads or chats that did (or are doing) the work. */
+  links?: string[]
+  /** Tasks under a milestone (one level deep). */
+  children?: ProgressItem[]
+  /** Proposed by the app from finished work; shown for the user to keep or dismiss. */
+  suggested?: boolean
+  /** Who last changed it. */
+  by?: 'user' | 'agent' | 'app'
+  createdAt: number
+  updatedAt: number
+}
+
+/** What the user or an agent sends to add or change one progress item. */
+export interface ProgressPatch {
+  /** Existing item to change; omitted to add one. */
+  id?: string
+  /** Milestone to add a new task under. */
+  parentId?: string
+  title?: string
+  status?: ProgressStatus
+  /** '' clears it. */
+  due?: string
+  note?: string
+  /** Conversation ids to link (added to existing links). */
+  link?: string[]
+  suggested?: boolean
+}
+
+export type Schedule =
+  | { kind: 'once'; at: number }
+  | { kind: 'interval'; minutes: number }
+  | { kind: 'daily'; time: string /* HH:MM */; weekdays?: number[] /* 0=Sun */ }
+  | { kind: 'cron'; expr: string }
+
+export interface Routine {
+  id: string
+  name: string
+  prompt: string
+  schedule: Schedule
+  /** Where results land: a project chat, an existing conversation, or a new chat each run. */
+  target: { projectId?: string; conversationId?: string }
+  backendId?: string
+  enabled: boolean
+  /** The conversation whose agent created it, if an agent did. */
+  createdBy?: string
+  /** Paused because its project was archived; restoring the project turns it back on. */
+  pausedByArchive?: boolean
+  /** Its runs may run commands (nobody is there to confirm them). Off by default. */
+  allowCommands?: boolean
+  createdAt: number
+  lastRunAt?: number
+  lastRunConversationId?: string
+  lastError?: string
+  nextRunAt?: number
+  /** Refreshes this card on the home board: each run replaces its data, and only the latest run's chat is kept. */
+  widgetId?: string
+}
+
+/** How a card on the home board shows its data. Fenn Code draws every kind but 'html' itself, in the app's look. */
+export type BoardWidgetBody =
+  | { kind: 'stat'; items: { label: string; value: string; note?: string; tone?: BoardTone }[] }
+  | { kind: 'list'; items: { text: string; done?: boolean; note?: string; tone?: BoardTone }[] }
+  | { kind: 'table'; columns: string[]; rows: string[][] }
+  | { kind: 'chart'; style: 'bar' | 'line'; labels: string[]; series: { name: string; values: number[] }[]; unit?: string }
+  | { kind: 'markdown'; text: string }
+  /** A page of its own, in a sandboxed frame: no access to the app or the computer. */
+  | { kind: 'html'; html: string; height?: number }
+export type BoardTone = 'good' | 'warn' | 'bad'
+
+/** A card on the home board that an agent made (in any chat or project), or a plugin. */
+/** Why a file opens view-only: text that isn't UTF-8 (shown as GBK), or a file outside the working folders. */
+export type ReadOnlyReason = 'encoding' | 'outside'
+
+export interface BoardWidget {
+  id: string
+  title: string
+  size: 'wide' | 'half'
+  body: BoardWidgetBody
+  /** The conversation whose agent made it. */
+  createdBy?: string
+  /** The routine that refreshes it. */
+  routineId?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface MemoryEntry {
+  name: string
+  description: string
+  type: string
+  body: string
+  updatedAt: number
+}
+
+export interface Blocker {
+  text: string
+  at: number
+  resolvedAt?: number
+}
+
+/** The obstacle the agent is working on now, if any. */
+export function currentBlocker(c: Pick<Conversation, 'blockers'>): Blocker | undefined {
+  const last = c.blockers?.[c.blockers.length - 1]
+  return last && !last.resolvedAt ? last : undefined
+}
+
+/** A plan's steps: the one in progress, and how many are done. */
+export function planProgress(checklist?: string): { step?: string; done: number; total: number } | undefined {
+  const steps = (checklist ?? '').split('\n').map((l) => l.replace(/\*\*/g, '').trim()).filter((l) => /^[✓✱○]/.test(l))
+  if (!steps.length) return undefined
+  const step = steps.find((l) => l.startsWith('✱'))?.replace(/^✱\s*/, '')
+  return { step, done: steps.filter((l) => l.startsWith('✓')).length, total: steps.length }
+}
+
+/** Records a new obstacle (closing the previous one), or with an empty text, clears the current one. */
+export function withBlocker(c: Pick<Conversation, 'blockers'>, text: string, now = Date.now()): Blocker[] {
+  const list = (c.blockers ?? []).map((b) => (b.resolvedAt ? b : { ...b, resolvedAt: now }))
+  const t = text.trim()
+  if (t && t !== currentBlocker(c)?.text) list.push({ text: t.slice(0, 200), at: now })
+  else if (t) return c.blockers ?? []
+  return list.slice(-12)
+}
+
+export interface BackendModelCatalog {
+  models: ModelInfo[]
+  current?: string
+  options?: SessionOption[]
+  /** The agent wouldn't open a session because it isn't signed in; no models until it is. */
+  needsLogin?: boolean
+}
+
+export interface AppSettings {
+  defaultBackendId: string
+  /** Secrets that couldn't be carried over from an old app name and have to be entered again. */
+  secretsToReenter?: string[]
+  /** The app name the one-time repair of secrets saved under old names last ran for. */
+  secretsRepairedFor?: string
+  /** Color scheme; 'system' follows the OS. */
+  theme: 'system' | 'light' | 'dark'
+  /** A faint dot grid behind the content that lights up near the pointer: 0 off, 1 or unset 轻 (the default), 2 明显. */
+  dotGrid?: number
+  /** Diagnostics: write every ACP message to logs/ in the data folder. Off by default. */
+  acpDebugLog?: boolean
+  /** UI language (Settings → 通用); 'system' follows the OS. */
+  language?: 'system' | 'zh' | 'en'
+  userName: string
+  /** Reads outside a chat's own folders go ahead without asking (Settings → 通用). Off by default. */
+  allowOutsideReads?: boolean
+  /** 自定义指令: what every agent in every conversation should follow (Settings → 通用). */
+  customInstructions?: string
+  /** Sessions of deleted or replaced chats to hide in the agent's own app (Codex Desktop) that failed once: the next sweep tries once more. */
+  agentAppPending?: { backendId: string; sessionId: string }[]
+  notifications?: boolean
+  /** Keep running in the tray after the window closes (Windows/Linux). */
+  runInBackground?: boolean
+  /** Lets agents see the screen and use the mouse and keyboard (asks per conversation). */
+  computerUse?: boolean
+  /** Before 0.1.2: a suggested folder. Folded into autoFolderRoot at startup. */
+  defaultCwd?: string
+  /** The first-run guide has been finished or skipped. */
+  onboarded?: boolean
+  /**
+   * Models each backend offered last time, with the one a new session starts on,
+   * so a new chat can show and pick a model before its first message.
+   */
+  backendModels?: Record<string, BackendModelCatalog>
+  /** Backends started when Fenn Code opens, before any chat needs them (no prompt is sent). Unset: the default backend only. */
+  prestartBackends?: Record<string, boolean>
+  /** The model the user last chose for each backend, independent of its advertised default. */
+  backendModelDefaults?: Record<string, string>
+  /** User-pinned agents retain their explicit order in the searchable picker. */
+  favoriteBackendIds?: string[]
+  /** Option choices (by backend, then option id) that new conversations start with. */
+  backendOptionDefaults?: Record<string, Record<string, string>>
+  /** Model-specific choices override the backend fallback when switching back. */
+  backendModelOptionDefaults?: Record<string, Record<string, Record<string, string>>>
+  /** Working folders the user chose, newest first. */
+  recentFolders?: string[]
+  /** Where a chat that makes files gets its own folder; Documents/Fenn Code when unset. */
+  autoFolderRoot?: string
+  /** Legacy home layout, retained only for saved-data compatibility. */
+  homeWidgets?: string[]
+}
+
+export interface AppInfo {
+  name: string
+  version: string
+  /** Short git commit the build came from, if known. */
+  commit?: string
+  builtAt?: string
+  electron?: string
+  chrome?: string
+  node?: string
+  platform: string
+  arch: string
+  /** Where chats' folders go when Settings names none. */
+  defaultFolder?: string
+  /** The build has a release channel, so 检查更新 can work. */
+  updates?: boolean
+  /** GPU compositing is unavailable; useful for rendering diagnostics. */
+  softwareRendering?: boolean
+}
+
+export type UpdateCheck =
+  | { status: 'latest'; version: string }
+  | { status: 'available'; version: string; url?: string; notes?: string }
+  | { status: 'unconfigured' }
+  | { status: 'error'; message: string }
+
+export interface AppSnapshot {
+  projects: Project[]
+  conversations: Conversation[]
+  routines: Routine[]
+  settings: AppSettings
+  backends: BackendSummary[]
+  platform: string
+  peerMessages?: PeerMessage[]
+  /** Permission prompts still waiting (a reloaded window shows them again). */
+  permissions?: { conversationId?: string; request: PermissionRequest }[]
+}
+
+/** Pushed from main to renderer. */
+export type AppEvent =
+  | { type: 'project'; project: Project }
+  | { type: 'project-removed'; id: string }
+  | { type: 'conversation'; conversation: Conversation }
+  | { type: 'conversation-removed'; id: string }
+  | { type: 'message'; message: Message }
+  | { type: 'message-removed'; conversationId: string; id: string }
+  | { type: 'routine'; routine: Routine }
+  | { type: 'routine-removed'; id: string }
+  /** A project's memory was written or an entry removed. */
+  | { type: 'memory-changed'; projectId: string }
+  | { type: 'peer-message'; message: PeerMessage }
+  | { type: 'settings'; settings: AppSettings }
+  | { type: 'backends'; backends: BackendSummary[] }
+  | { type: 'permission'; conversationId?: string; request: PermissionRequest }
+  | { type: 'permission-resolved'; requestId: string }
+  | { type: 'toast'; level: 'info' | 'error'; text: string }
+  | { type: 'open-conversation'; conversationId: string }
+  /** The macOS app menu's 「设置…」 (⌘,). */
+  | { type: 'open-settings' }
+  /** Output of a backend upgrade as it runs. */
+  | { type: 'backend-upgrade'; backendId: string; line: string }
+
+/** A tool server (MCP) the user adds once; every agent session gets it, whatever the backend. */
+export interface Connector {
+  id: string
+  name: string
+  enabled: boolean
+  kind: 'command' | 'http'
+  command?: string
+  args?: string[]
+  url?: string
+  /** Environment variables (command) or request headers (http). Never sent to the UI. */
+  secrets?: Record<string, string>
+}
+
+/** What the UI sees of a connector: secret values stay in the main process. */
+export type ConnectorView = Omit<Connector, 'secrets'> & { secretKeys: string[] }
+
+export interface SearchHit {
+  conversationId: string
+  messageId: string
+  role: 'user' | 'assistant'
+  createdAt: number
+  snippet: string
+}
+
+/** A folder the app thinks the user may want to work in. */
+export interface FolderCandidate {
+  path: string
+  name: string
+  /** Last change to the folder itself, as a rough "recently worked on". */
+  mtime: number
+}
+
+export interface NewChatOptions {
+  backendId?: string
+  projectId?: string
+  /** Working folder; '' for none, omitted for the project's or the default one. */
+  cwd?: string
+  /** Model to start on (from the backend's remembered model list). */
+  modelId?: string
+  /** Session options for this chat only (e.g. a permission mode chosen before sending). */
+  optionValues?: Record<string, string>
+  text: string
+  attachments?: Attachment[]
+}
+
+/** The API the renderer sees as window.fenn. */
+export interface FennApi {
+  browserInfo(conversationId: string): Promise<BrowserInfo | null>
+  browserFrame(conversationId: string): Promise<BrowserFrame | null>
+  stopBrowser(conversationId: string): Promise<void>
+  listMemorySkills(projectId: string): Promise<MemorySkill[]>
+  composeMemory(projectId: string, input: MemoryInput): Promise<MemoryDraft>
+  snapshot(): Promise<AppSnapshot>
+  messages(conversationId: string): Promise<Message[]>
+  organizeContext(conversationId: string): Promise<void>
+  onEvent(listener: (e: AppEvent) => void): () => void
+
+  startChat(opts: NewChatOptions): Promise<Conversation>
+  send(conversationId: string, text: string, attachments?: Attachment[], referenceIds?: string[]): Promise<void>
+  /** The app's own / commands (/子对话 in a chat, /讨论串 in a project); returns the new conversation's id. */
+  runCommand(conversationId: string, command: 'subchat' | 'thread', text: string): Promise<string>
+  /** Explicit legacy forwarding; composer @ uses contextual references instead. */
+  sendToThread(projectConversationId: string, threadId: string, text: string, attachments?: Attachment[]): Promise<void>
+  /** Drops the last reply and asks again. */
+  regenerate(conversationId: string): Promise<void>
+  /** Replaces a user message (and everything after it) with an edited version. */
+  editMessage(conversationId: string, messageId: string, text: string): Promise<void>
+  /** Shows version `index` of an edited or regenerated turn. */
+  switchVariant(conversationId: string, group: string, index: number): Promise<void>
+  /** Stops the reply; messages still waiting come back, for the composer. */
+  cancel(conversationId: string): Promise<QueuedMessage[]>
+  /** A message waiting behind the reply: 'now' stops the reply and sends it next; 'take' removes it (returned, for editing). */
+  queuedMessage(conversationId: string, id: string, action: 'now' | 'take'): Promise<QueuedMessage | undefined>
+  setModel(conversationId: string, modelId: string): Promise<void>
+  /** Sets a session option (e.g. the mode) for one conversation. */
+  setOption(conversationId: string, optionId: string, value: string): Promise<void>
+  /** Sets what new conversations on a backend start with. */
+  setOptionDefault(backendId: string, optionId: string, value: string, modelId?: string): Promise<void>
+  setModelDefault(backendId: string, modelId: string): Promise<void>
+  /** Whether the user is signed in to a backend, if it can tell. */
+  backendAccount(backendId: string): Promise<AccountStatus>
+  backendCredits(backendId: string, refresh?: boolean): Promise<CreditQuota | undefined>
+  /** Opens the conversation's agent session in the background, before the first message. Sends nothing. */
+  prepareConversation(conversationId: string): Promise<void>
+  /** Starts an agent before the first message of a new chat. Sends nothing. */
+  /** `folder`: from a new chat's composer ("" for none), which also gets that chat's session opened ahead where that is slow. */
+  warmBackend(backendId: string, folder?: string): Promise<void>
+  /** Opens the folder the ACP debug log is written to. */
+  openLogFolder(): Promise<void>
+  /** Reads the agent's session metadata without sending a prompt or creating a chat. */
+  backendModels(backendId: string, modelId?: string): Promise<BackendModelCatalog>
+  backendLatestVersion(backendId: string): Promise<string | undefined>
+  /** Opens a result file with its default app (documents, images, text), or shows it in its folder. */
+  openOutput(path: string, reveal?: boolean): Promise<{ ok: boolean; error?: string }>
+  /** Runs the backend's upgrade command; output arrives as 'backend-upgrade' events. */
+  upgradeBackend(backendId: string): Promise<{ ok: boolean; output: string; account: AccountStatus; /** Installed, but the program still isn't on PATH. */ notFound?: boolean }>
+  updateConversation(id: string, patch: Partial<Pick<Conversation, 'title' | 'pinned' | 'resolved' | 'projectId' | 'unread' | 'cwd' | 'backendId'>>): Promise<void>
+  deleteConversation(id: string): Promise<void>
+  inspectDelivery(id: string, revision: string, analyzeAgain?: boolean): Promise<DeliveryReview>
+  deliveryFile(id: string, revision: string, path: string): Promise<ReviewFileContent>
+  acceptDelivery(id: string, revision: string): Promise<void>
+  returnDelivery(id: string, revision: string, feedback: string, continuation?: 'thread' | 'main'): Promise<void>
+  discussDelivery(id: string, revision: string, feedback: string): Promise<void>
+
+  createProject(p: { name: string; description?: string; instructions?: string; cwd?: string; backendId?: string }): Promise<Project>
+  updateProject(id: string, patch: Partial<Omit<Project, 'id' | 'conversationId' | 'createdAt'>>): Promise<void>
+  deleteProject(id: string): Promise<void>
+
+  saveRoutine(r: Omit<Routine, 'id' | 'createdAt'> & { id?: string }): Promise<Routine>
+  deleteRoutine(id: string): Promise<void>
+  /** Where a file shown in a chat lives: a chat's or project's folder (and its path there), or nowhere the app manages. */
+  locateFile(path: string, near?: string): Promise<{ libraryId?: string; rel?: string }>
+  /** A file outside the working folders, read only. */
+  readLocalFile(path: string): Promise<Awaited<ReturnType<FennApi['readLibraryFile']>>>
+  runRoutineNow(id: string): Promise<void>
+
+  listMemory(projectId: string): Promise<MemoryEntry[]>
+  saveMemory(projectId: string, e: { name: string; description: string; type?: string; body: string }): Promise<void>
+  deleteMemory(projectId: string, name: string): Promise<void>
+  search(query: string): Promise<SearchHit[]>
+  artifactInfo(id: string): Promise<{ id: string; title: string; versions: { version: number; createdAt: number }[] } | null>
+  artifactSource(id: string, version?: number): Promise<string | null>
+  /** Withdraws a message one thread left for another, while it still waits. */
+  cancelPeerMessage(id: string): Promise<void>
+  compactContext(conversationId: string): Promise<void>
+  /** Stops a command the conversation's agent runs through the app (listed under 后台). */
+  stopCommand(conversationId: string, id: string): Promise<void>
+  /** What a background command has printed so far (its end). */
+  commandOutput(conversationId: string, id: string): Promise<string>
+  /** Answers a decision card: records the choice and sends it to the agent. */
+  chooseDecision(conversationId: string, messageId: string, blockIndex: number, option: number): Promise<void>
+  listConnectors(): Promise<ConnectorView[]>
+  /** secrets: new values to set; keys missing from it keep their stored value, an empty string removes one. */
+  saveConnector(c: Omit<Connector, 'id' | 'secrets'> & { id?: string; secrets?: Record<string, string> }): Promise<ConnectorView>
+  deleteConnector(id: string): Promise<void>
+  /** Re-reads backends.json and the plugin list. */
+  /** Re-reads backends.json; on an error the previous backends stay active and the error is returned. */
+  reloadBackends(): Promise<{ backends: BackendSummary[]; error?: string }>
+  backendsConfigStatus(): Promise<{ error?: string; example: string }>
+  appInfo(): Promise<AppInfo>
+  /** Reported tokens by local date, across conversations. */
+  usageCalendar(): Promise<UsageSummary>
+  /** Moves a request the project chat answered inline into a new thread. */
+  convertToThread(conversationId: string, messageId: string): Promise<void>
+  checkForUpdates(): Promise<UpdateCheck>
+  backendAuthMethods(backendId: string): Promise<{ id: string; name: string; description?: string }[]>
+  /** Runs the backend's sign-in flow (may open a browser). */
+  backendLogin(backendId: string, methodId: string): Promise<AccountStatus>
+  /** Opens a terminal running the backend's sign-in command (e.g. `qodercli login`). */
+  backendTerminalLogin(backendId: string): Promise<void>
+  listProjectFiles(projectId: string): Promise<{ name: string; size: number; updatedAt: number }[]>
+  /**
+   * The files panel (a project's 库): one folder of the working folder of a
+   * project or conversation (`id` is either; rel '' is the top). Undefined when
+   * it has no folder or rel is not a folder in it.
+   */
+  listLibrary(id: string, rel?: string): Promise<{ root: string; entries: LibraryEntry[]; truncated: boolean } | undefined>
+  /** Files the agents changed in that folder (a project's conversations, or a chat and its sub-conversations), newest first. */
+  libraryChanges(id: string): Promise<LibraryChange[]>
+  /** A file of that folder for the preview. readOnly: why it is never edited here. */
+  readLibraryFile(id: string, rel: string): Promise<{ text?: string; size: number; updatedAt: number; image?: string; tooBig?: boolean; binary?: boolean; readOnly?: ReadOnlyReason } | undefined>
+  /** Opens a file of that folder with its app (folders and safe files), or shows it in its folder. */
+  openLibraryPath(id: string, rel: string, reveal?: boolean): Promise<{ ok: boolean; error?: string }>
+  /** Gives a chat or project without a folder one under the default folder (named after it); returns its path. */
+  makeDefaultFolder(id: string): Promise<string>
+  /** Copies files into a folder of it; names already taken get a number. */
+  addToLibrary(id: string, rel: string, files: { name: string; data: string }[]): Promise<void>
+  /** Renames a file or folder of it in place; returns its new path. */
+  renameLibraryPath(id: string, rel: string, name: string): Promise<string>
+  /** Makes an empty file (or folder) named `name` in folder `rel` of it; returns its path. */
+  createLibraryEntry(id: string, rel: string, name: string, dir: boolean): Promise<string>
+  /** Saves an edited text file. `since`: its updatedAt when editing began; if it changed after that, nothing is written (conflict) unless `force`. */
+  /** `conflict`: changed on disk since `since` (nothing written unless `force`). `gone`: moved, renamed or deleted meanwhile (nothing written unless `recreate`, which makes it again where it was). */
+  saveLibraryFile(id: string, rel: string, text: string, since?: number, force?: boolean, recreate?: boolean): Promise<{ updatedAt?: number; conflict?: boolean; gone?: boolean }>
+  /** Moves a file or folder of it to the Recycle Bin (Trash). */
+  deleteLibraryPath(id: string, rel: string): Promise<void>
+  /** data is base64. */
+  addProjectFiles(projectId: string, files: { name: string; data: string }[]): Promise<void>
+  deleteProjectFile(projectId: string, name: string): Promise<void>
+  updateProgress(projectId: string, patch: ProgressPatch): Promise<ProgressItem>
+  deleteProgress(projectId: string, id: string): Promise<void>
+  /** Existing folders a message mentions (a file's own folder for a file path). */
+  foldersInText(text: string): Promise<string[]>
+  /** Likely project folders (git repositories under the usual places); with `onlyMatching`, only names matching the hint. */
+  suggestFolders(hint: string, onlyMatching?: boolean): Promise<FolderCandidate[]>
+
+  updateSettings(patch: Partial<AppSettings>): Promise<void>
+  setBackendSetting(backendId: string, key: string, value: string): Promise<void>
+  respondPermission(requestId: string, decision: PermissionDecision): Promise<void>
+  /** The system folder picker, opened at start (else the default folder). */
+  pickFolder(start?: string): Promise<string | null>
+  /** Opens the folder holding backends.json in the system file manager. */
+  openConfigFolder(): Promise<void>
+  /** Saves a conversation as Markdown via a save dialog; false if cancelled. */
+  exportConversation(conversationId: string): Promise<boolean>
+
+  platform: string
+  windowControl(action: 'minimize' | 'maximize' | 'close'): void
+}
+
+/** Migrate retired glass settings to an opaque color scheme and drop the old switch. */
+export function normalizeTheme<T extends { theme?: string; glass?: unknown }>(s: T): Omit<T, 'theme' | 'glass'> & { theme: AppSettings['theme'] } {
+  const { glass: _removed, theme, ...settings } = s
+  return { ...settings, theme: theme === 'glass' || theme === 'dark' ? 'dark' : theme === 'glass-light' || theme === 'light' ? 'light' : 'system' }
+}
+
+/** One file or folder in a project's library. `path` is relative to the project's folder, with / between parts. */
+export interface LibraryEntry {
+  name: string
+  path: string
+  dir: boolean
+  size?: number
+  updatedAt: number
+}
+
+/** A file an agent changed in the project's folder. */
+export interface LibraryChange {
+  path: string
+  kind: 'edit' | 'delete' | 'move'
+  changedAt: number
+  conversationId: string
+  exists?: boolean
+  size?: number
+}
+
+/** A command an agent ran through the app's terminal. */
+export interface BackgroundCommand {
+  id: string
+  command: string
+  startedAt: number
+  endedAt?: number
+  exitCode?: number | null
+  /** Ended in failure with no exit code to show. */
+  failed?: boolean
+  /** What it is for, in the agent's words. */
+  title?: string
+  /** The agent's own background task: it runs and stops it, the app only shows it. */
+  managed?: boolean
+  monitor?: boolean
+  /** It was still running when its reply ended: real background work (not a step of the reply). */
+  detached?: boolean
+  /** The end of what it printed, kept once it ended. */
+  output?: string
+  outputFile?: string
+}
+import type { MemoryInput, MemoryDraft, MemorySkill } from './memoryInput'

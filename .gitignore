@@ -1,0 +1,15 @@
+node_modules/
+out/
+.local/
+.ui-craft/
+test-results/
+test-results*.json
+coverage/
+dist/
+release/
+*.log
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.DS_Store
