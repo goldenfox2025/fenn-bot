@@ -203,7 +203,7 @@ async function shot(name) {
   // Electron's CDP screenshot crop is wrong after page zoom. Capture the full
   // actual WebContents surface for reliable 125/150% visual acceptance.
   const image = await app.evaluate(async ({ BrowserWindow }) =>
-    (await BrowserWindow.getAllWindows()[0].webContents.capturePage())
+    (await BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined,{stayHidden:true,stayAwake:true}))
       .toPNG()
       .toString("base64"),
   );
@@ -313,7 +313,7 @@ try {
   await page.keyboard.press("Control+k");
   await wait(
     () =>
-      document.activeElement?.getAttribute("aria-label") === "搜索 Bot 或消息",
+      document.activeElement?.getAttribute("aria-label") === "搜索 Bot、群聊或消息",
   );
   await page.keyboard.insertText("研究");
   assert.equal(await page.locator(".search-results button").count(), 1);

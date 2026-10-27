@@ -23,7 +23,7 @@
     "start": "electron .",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:ui": "node scripts/ui.mjs"
+    "test:ui": "node scripts/ui-suite.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.8.0",

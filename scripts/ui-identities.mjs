@@ -41,7 +41,7 @@ try {
   const page = await app.firstWindow(); page.setDefaultTimeout(10000); const errors = []; page.on('pageerror', error => errors.push(error.message));
   await page.locator('.bot-app').waitFor();
   const settle = async () => { await page.evaluate(async () => { await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); await Promise.allSettled(document.getAnimations().filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished)); await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))); }); };
-  const shot = async name => { await settle(); const png = await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].webContents.capturePage()).toPNG().toString('base64')); writeFileSync(join(shots, name + '.png'), Buffer.from(png, 'base64')); };
+  const shot = async name => { await settle(); const png = await app.evaluate(async ({ BrowserWindow }) => (await BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG().toString('base64')); writeFileSync(join(shots, name + '.png'), Buffer.from(png, 'base64')); };
   const resize = async width => { await app.evaluate(({ BrowserWindow }, width) => BrowserWindow.getAllWindows()[0].setContentSize(width, 800), width); await settle(); };
   await resize(1100);
   assert.deepEqual(await page.locator('.bot-list .bot-item [data-avatar]').evaluateAll(elements => elements.map(el => el.dataset.avatar)), ['fox', 'owl']);

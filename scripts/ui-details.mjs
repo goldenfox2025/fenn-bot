@@ -33,7 +33,8 @@ await page.locator('.memory-delete').getByRole('button',{name:'删除',exact:tru
 for(const [theme,width,height] of [['light',1040,763],['dark',680,700]]) {
   await app.evaluate(({BrowserWindow},size)=>BrowserWindow.getAllWindows()[0].setContentSize(size[0],size[1]),[width,height]);
   await page.evaluate(theme=>window.bot.configure({theme}),theme);
-  if (!await page.locator('.task-inspector').count()) await page.getByRole('button',{name:'查看 Bot 详情',exact:true}).click();
+  await page.evaluate(async()=>{await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));await Promise.allSettled(document.getAnimations().filter(animation=>animation.effect?.getTiming().iterations!==Infinity).map(animation=>animation.finished));});
+  if (!await page.locator('.task-inspector:not([data-exiting])').isVisible()) await page.getByRole('button',{name:'查看 Bot 详情',exact:true}).click();
   await page.getByRole('radio',{name:'详情',exact:true}).check();
   await page.getByRole('button',{name:'添加定期任务',exact:true}).click();
   await page.getByRole('textbox',{name:'名称',exact:true}).fill('每周整理');
@@ -46,7 +47,7 @@ for(const [theme,width,height] of [['light',1040,763],['dark',680,700]]) {
   await time.click();const popup=page.locator('.select-list:popover-open');await popup.waitFor();
   const r=await popup.boundingBox();assert(r.x>=0 && r.x+r.width<=viewport.width+1 && r.y>=0 && r.y+r.height<=viewport.height+1);
   await time.press('Escape');assert.equal(await page.locator('.conversation-history').evaluate(el=>el.scrollTop),before);
-  const png=await app.evaluate(async({BrowserWindow})=>(await BrowserWindow.getAllWindows()[0].webContents.capturePage()).toPNG().toString('base64'));
+  const png=await app.evaluate(async({BrowserWindow})=>(await BrowserWindow.getAllWindows()[0].webContents.capturePage(undefined,{stayHidden:true,stayAwake:true})).toPNG().toString('base64'));
   writeFileSync(`test-results/details/${theme}-${width}-routine.png`,Buffer.from(png,'base64'));
   await page.getByRole('button',{name:'取消',exact:true}).click();
 }

@@ -164,6 +164,7 @@ export interface BotApi {
   deleteBot(id: string): Promise<void>;
   createGroup(name: string, memberIds: string[]): Promise<GroupChat>;
   updateGroup(id: string, patch: { name?: string; memberIds?: string[] }): Promise<void>;
+  deleteGroup(id: string): Promise<void>;
   sendGroup(id: string, text: string): Promise<void>;
   stopGroup(id: string): Promise<void>;
   send(id: string, text: string): Promise<void>;

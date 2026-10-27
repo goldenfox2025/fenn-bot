@@ -141,12 +141,14 @@ export function App() {
     );
   const busy = !!bot && ["running", "waiting", "stopping"].includes(bot.status),
     draft = bot ? drafts[bot.id] || "" : "";
-  const setDraft = (text: string) => {
-    if (!bot) return;
-    const next = { ...drafts, [bot.id]: text };
-    setDrafts(next);
-    localStorage.setItem("bot:drafts", JSON.stringify(next));
+  const writeDraft = (id: string, text: string, restore = false) => {
+    setDrafts(previous => {
+      const next = { ...previous, [id]: restore ? previous[id] || text : text };
+      localStorage.setItem("bot:drafts", JSON.stringify(next));
+      return next;
+    });
   };
+  const setDraft = (text: string) => { if (bot) writeDraft(bot.id, text); };
   const send = () => {
     if (!bot || busy || !draft.trim()) return;
     const text = draft;
@@ -154,7 +156,7 @@ export function App() {
     setError("");
     void (group ? api().sendGroup(group.id, text) : api().send(bot.id, text))
       .catch((error) => {
-        setDraft(text);
+        writeDraft(bot.id, text, true);
         setError(String(error.message || error));
       });
   };
@@ -385,6 +387,7 @@ export function App() {
           ) : dialog === "search" ? (
             <SearchBots
               bots={state.bots}
+              groups={state.groups}
               onPick={(id) => {
                 setSelected(id);
                 setDialog(null);

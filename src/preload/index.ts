@@ -7,7 +7,7 @@ const names = [
   "onboardBot",
   "updateBot",
   "deleteBot",
-  "createGroup", "updateGroup", "sendGroup", "stopGroup",
+  "createGroup", "updateGroup", "deleteGroup", "sendGroup", "stopGroup",
   "send",
   "stop",
   "prepare",

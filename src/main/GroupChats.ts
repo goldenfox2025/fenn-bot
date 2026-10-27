@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Bot, GroupChat, Message } from '../shared/model';
+import { groupHostId } from '../shared/groupHost';
 
 interface Round { used: Set<string>; jobs: Set<Promise<void>>; cancelled: Promise<void>; cancel(): void }
 export class GroupChats {
@@ -18,7 +19,7 @@ export class GroupChats {
     return members;
   }
   create(name: string, memberIds: string[]) {
-    const bots = this.deps.bots(), members = this.members(memberIds), hostId = members.includes(bots[0]?.id) ? bots[0].id : members[0];
+    const bots = this.deps.bots(), members = this.members(memberIds), hostId = groupHostId(members, bots[0]?.id);
     const group: GroupChat = { id: randomUUID(), name: name.trim().slice(0, 80) || members.map(id => bots.find(bot => bot.id === id)!.name).join('、').slice(0, 60), hostId, memberIds: members, messages: [], actors: [], createdAt: Date.now() };
     this.deps.groups().push(group); this.deps.changed(); return group;
   }
@@ -29,7 +30,7 @@ export class GroupChats {
       const members = this.members(patch.memberIds);
       for (const actor of group.actors.filter(actor => !members.includes(actor.identityId!))) await this.deps.stop(actor.id);
       group.actors = group.actors.filter(actor => members.includes(actor.identityId!)); group.memberIds = members;
-      if (!members.includes(group.hostId)) group.hostId = members[0];
+      group.hostId = groupHostId(members, this.deps.bots()[0]?.id, group.hostId);
     }
     if (patch.name !== undefined) group.name = patch.name.trim().slice(0, 80) || group.name;
     this.deps.changed();
@@ -92,8 +93,15 @@ export class GroupChats {
     const group = this.group(id); this.rounds.get(id)?.cancel(); this.rounds.delete(id);
     await Promise.allSettled(group.actors.map(actor => this.deps.stop(actor.id))); this.deps.changed();
   }
+  async remove(id: string) {
+    const group = this.group(id);
+    await this.stop(id);
+    const groups = this.deps.groups(), index = groups.indexOf(group);
+    if (index >= 0) groups.splice(index, 1);
+    this.deps.changed();
+  }
   async removeBot(id: string) {
-    for (const group of this.deps.groups().filter(group => group.memberIds.includes(id))) { await this.stop(group.id); group.memberIds = group.memberIds.filter(member => member !== id); group.actors = group.actors.filter(actor => actor.identityId !== id); if (group.hostId === id) group.hostId = group.memberIds[0] || ''; }
+    for (const group of this.deps.groups().filter(group => group.memberIds.includes(id))) { await this.stop(group.id); group.memberIds = group.memberIds.filter(member => member !== id); group.actors = group.actors.filter(actor => actor.identityId !== id); group.hostId = groupHostId(group.memberIds, this.deps.bots()[0]?.id, group.hostId); }
   }
 }
 

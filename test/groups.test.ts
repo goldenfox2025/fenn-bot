@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { GroupChats, mentionedMembers } from '../src/main/GroupChats';
 import type { Bot, GroupChat } from '../src/shared/model';
 import { assignAvatars } from '../src/shared/avatars';
+import { groupHostId } from '../src/shared/groupHost';
 
 const identity = (id: string, name = id): Bot => ({ id, name, instructions: '', backendId: 'fixture', messages: [], status: 'idle' });
 function setup() {
@@ -12,6 +13,19 @@ function setup() {
   return { bots, groups, calls, manager, setRun: (fn: typeof run) => { run = fn; } };
 }
 describe('shared chat routing', () => {
+  it('shares host selection between member edits, creation and the recipient preview', () => {
+    expect(groupHostId(['ann','main'],'main')).toBe('main');
+    expect(groupHostId(['ann','anna'],'main','main')).toBe('ann');
+    expect(groupHostId(['main','ann'],'main','ann')).toBe('ann');
+  });
+  it('deletes a stalled room without removing its direct Bot identities', async () => {
+    const { manager, bots, groups, setRun } = setup(), group = manager.create('Delete', bots.slice(0,2).map(bot=>bot.id));
+    setRun(()=>new Promise(()=>{}));
+    const work=manager.send(group.id,'Wait');
+    await manager.remove(group.id);await work;
+    expect(groups).toEqual([]);expect(bots).toHaveLength(4);
+    await expect(manager.send(group.id,'Late message')).rejects.toThrow('不存在');
+  });
   it('matches exact and quoted mentions without prefix collisions', () => {
     const { bots } = setup();
     expect(mentionedMembers('@Anna check', bots)).toEqual(['anna']);

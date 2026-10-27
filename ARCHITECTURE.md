@@ -13,7 +13,7 @@
 - `src/renderer/components/{BotFace,SearchBots}.tsx`: local neutral avatar and local chat search.
 - `src/renderer/components/{ApprovalCard,Inspector}.tsx`: decisions, grants and evidence.
 - `src/renderer/components/{Dialog,BotEditor,Settings}.tsx`: modals and configuration.
-- `src/renderer/components/{SelectControl,SidebarResize,BotRoutines}.tsx`: shared selector behavior, persistent sidebar sizing and task management.
+- `src/renderer/components/{SelectControl,PaneResize,BotRoutines}.tsx`: shared selector behavior, persistent sidebar sizing and task management.
 - `src/renderer/usePanelFocus.ts`: narrow-panel focus containment and restoration.
 - `src/renderer/theme.css`: Bot palette; `style.css` owns component layout.
 
@@ -32,4 +32,8 @@ The shared MCP server binds live tool definitions when HTTP headers arrive, befo
 
 `main/GroupChats.ts` owns membership, routing, bounded rounds and public message attribution. A room actor is a separate Bot runtime owned by a group, with its own session, journal, memory and permissions. It is not listed as another direct Bot, and never replays a private DM. `BotCore` supplies the existing execution/Stop/tool lifecycle. Normal groups cannot create unlisted scheduled tasks.
 
-The app retains conversation state while a narrow details page is open. Pane preference, actual room to dock, and explicit user opening are separate states; collapsing space must not overwrite user intent. A content-sized wide pane and a narrow details page use the same inspector body.
+The app retains conversation state while a narrow details page is open. Pane preference, actual room to dock, and explicit user opening are separate states; collapsing space must not overwrite user intent. A full-height docked inspector and a narrow details page use the same body.
+
+`shared/groupHost.ts` owns default host selection for the router and member-editor preview. `SearchBots` searches direct Bots and rooms through the same visible-message path. Removing a room stops its actors but keeps member identities and private chats. Draft writes merge into the latest per-conversation map so delayed transport failures cannot erase another conversation's draft. Scheduled dispatches are activity requests, not synthetic human chat messages.
+
+`scripts/ui-suite.mjs` owns full UI acceptance ordering and the temporary profile passed to follow-up checks. `scripts/ui-lifecycle.mjs` covers custom backends, cross-backend preferences, restart, group repair/deletion, real scheduled dispatch and late-send draft recovery. The optional `browser.integration.test.ts` uses fixture-owned Chrome CDP profiles only, never the user's daily browser.

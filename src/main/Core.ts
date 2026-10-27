@@ -116,7 +116,7 @@ export class BotCore {
       list: () => this.state.routines,
       busy: (id) => this.running.has(id),
       send: async (id, text) => {
-        const work = this.send(id, text);
+        const work = this.send(id, text, { senderName: '定期任务', displayText: text, activity: true });
         const journal = this.bot(id).messages.findLast((message) => message.channel === "activity");
         await work;
         if (journal?.turnStatus === "cancelled") throw Error("任务已停止，尚未完成。");
@@ -402,6 +402,7 @@ export class BotCore {
   }
   createGroup(name: string, memberIds: string[]) { return this.groups.create(name, memberIds); }
   async updateGroup(id: string, patch: { name?: string; memberIds?: string[] }) { await this.groups.update(id, patch); }
+  async deleteGroup(id: string) { await this.groups.remove(id); }
   async sendGroup(id: string, text: string) { await this.groups.send(id, text); }
   async stopGroup(id: string) { await this.groups.stop(id); }
   async deleteBot(id: string) {
